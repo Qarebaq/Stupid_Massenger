@@ -579,7 +579,7 @@ class ChatUI:
 # ---------- Main client logic ----------
 def run_client():
     print("=" * 50)
-    print("Welcome to SimpleCLIChat - Enhanced Version")
+    print("Welcome to StupidChat - Enhanced Version")
     print("=" * 50)
     
     while True:
