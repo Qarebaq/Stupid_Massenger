@@ -6,6 +6,7 @@ Terminal chat client with curses UI - Fixed Version
 - Shows sidebar of friends and groups, main window shows chat with selected friend/group
 - Local SQLite per-user caches messages, friends, and groups
 - Added group functionality and improved error handling
+- FIXED: Immediate message display and duplicate message issues
 """
 
 import socket
@@ -204,9 +205,11 @@ class NetworkThread(threading.Thread):
 
 # ---------- Enhanced curses UI ----------
 class ChatUI:
-    def __init__(self, stdscr, send_cb):
+    def __init__(self, stdscr, send_cb, username, local_conn):
         self.stdscr = stdscr
         self.send_cb = send_cb
+        self.username = username
+        self.local_conn = local_conn
         curses.curs_set(0)
         self.height, self.width = self.stdscr.getmaxyx()
         
@@ -328,6 +331,42 @@ class ChatUI:
         return group_id
 
     def refresh_chat(self):
+        """Refresh chat by reloading history from database"""
+        if self.selected_type == "friend" and self.selected_friend:
+            hist = local_get_history(self.local_conn, self.username, other=self.selected_friend)
+        elif self.selected_type == "group" and self.selected_group:
+            hist = local_get_history(self.local_conn, self.username, group_id=self.selected_group)
+        else:
+            hist = []
+
+        lines = []
+        for record in hist:
+            sender, receiver, group_id, text, ts = record
+            timestamp = datetime.fromtimestamp(ts).strftime('%H:%M')
+            if group_id:
+                prefix = f"{sender}: " if sender != self.username else "Me: "
+            else:
+                prefix = "Me: " if sender == self.username else f"{sender}: "
+            lines.append(f"[{timestamp}] {prefix}{text}")
+        
+        self.attach_chat_lines(lines)
+
+    def add_message_to_chat(self, sender, text, is_group=False, group_id=None):
+        """Add a single message to current chat display"""
+        timestamp = datetime.now().strftime('%H:%M')
+        if is_group:
+            prefix = f"{sender}: " if sender != self.username else "Me: "
+        else:
+            prefix = "Me: " if sender == self.username else f"{sender}: "
+        
+        new_line = f"[{timestamp}] {prefix}{text}"
+        
+        with self.lock:
+            self.chat_lines.append(new_line)
+            # Keep only last 200 lines to prevent memory issues
+            if len(self.chat_lines) > 200:
+                self.chat_lines = self.chat_lines[-200:]
+        
         self.redraw()
 
     def redraw(self):
@@ -494,12 +533,15 @@ class ChatUI:
                     else:
                         # send message to selected friend or group
                         if self.selected_type == "friend" and self.selected_friend:
+                            # Store message locally immediately for instant display
+                            local_store_message(self.local_conn, self.username, self.selected_friend, None, line)
+                            self.add_message_to_chat(self.username, line, is_group=False)
                             self.send_cb({"type":"msg","to":self.selected_friend,"text":line})
-                            self.log(f"Me -> {self.selected_friend}: {line}")
                         elif self.selected_type == "group" and self.selected_group:
+                            # Store message locally immediately for instant display
+                            local_store_message(self.local_conn, self.username, None, self.selected_group, line)
+                            self.add_message_to_chat(self.username, line, is_group=True, group_id=self.selected_group)
                             self.send_cb({"type":"group_msg","group_id":self.selected_group,"text":line})
-                            group_name = self._get_group_name(self.selected_group)
-                            self.log(f"Me -> #{group_name}: {line}")
                         else:
                             self.log("No friend or group selected")
                 self.redraw()
@@ -614,7 +656,7 @@ def run_client():
         # run curses UI
         def curses_main(stdscr):
             try:
-                ui = ChatUI(stdscr, lambda obj: net.send_json(obj))
+                ui = ChatUI(stdscr, lambda obj: net.send_json(obj), username, local_conn)
                 net.ui = ui
                 
                 # load cached data
@@ -624,23 +666,7 @@ def run_client():
                 ui.set_groups(groups)
 
                 # initial chat load
-                if ui.selected_type == "friend" and ui.selected_friend:
-                    hist = local_get_history(local_conn, username, other=ui.selected_friend)
-                elif ui.selected_type == "group" and ui.selected_group:
-                    hist = local_get_history(local_conn, username, group_id=ui.selected_group)
-                else:
-                    hist = []
-
-                lines = []
-                for record in hist:
-                    sender, receiver, group_id, text, ts = record
-                    timestamp = datetime.fromtimestamp(ts).strftime('%H:%M')
-                    if group_id:
-                        prefix = f"{sender}: " if sender != username else "Me: "
-                    else:
-                        prefix = "Me: " if sender == username else f"{sender}: "
-                    lines.append(f"[{timestamp}] {prefix}{text}")
-                ui.attach_chat_lines(lines)
+                ui.refresh_chat()
 
                 ui.log("Connected! Use TAB to switch between friends/groups")
                 ui.redraw()
@@ -651,26 +677,12 @@ def run_client():
                     if result == "quit":
                         break
                     elif result == "switch":
-                        # load history of newly selected friend/group
+                        # load history of newly selected friend/group without duplicating
+                        ui.refresh_chat()
                         if ui.selected_type == "friend" and ui.selected_friend:
                             net.send_json({"type":"get_history","other":ui.selected_friend})
-                            hist = local_get_history(local_conn, username, other=ui.selected_friend)
                         elif ui.selected_type == "group" and ui.selected_group:
                             net.send_json({"type":"get_history","group_id":ui.selected_group})
-                            hist = local_get_history(local_conn, username, group_id=ui.selected_group)
-                        else:
-                            hist = []
-
-                        lines = []
-                        for record in hist:
-                            sender, receiver, group_id, text, ts = record
-                            timestamp = datetime.fromtimestamp(ts).strftime('%H:%M')
-                            if group_id:
-                                prefix = f"{sender}: " if sender != username else "Me: "
-                            else:
-                                prefix = "Me: " if sender == username else f"{sender}: "
-                            lines.append(f"[{timestamp}] {prefix}{text}")
-                        ui.attach_chat_lines(lines)
                     
                     # small sleep to prevent high CPU usage
                     time.sleep(0.01)
