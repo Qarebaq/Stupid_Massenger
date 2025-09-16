@@ -1,11 +1,12 @@
 # server.py
 """
-Simple Chat Server (JSON-over-TCP) - Improved Version
+Simple Chat Server (JSON-over-TCP) - Enhanced Version with Bot
 - sqlite DB: users, friends, messages, groups
 - supports register/login, add_friend, send msg, get_friends, get_history
 - supports create_group, join_group, leave_group, group_message
 - stores undelivered messages and delivers them when user connects
 - improved error handling and thread safety
+- Added helper bot with @echo and @all commands
 """
 
 import socket
@@ -14,6 +15,7 @@ import json
 import sqlite3
 import time
 import hashlib
+import bcrypt
 from datetime import datetime
 
 HOST = "0.0.0.0"
@@ -25,6 +27,9 @@ lock = threading.Lock()  # protect sqlite access and clients dict
 # map username -> wfile (to send JSON lines)
 clients = {}
 
+# Bot configuration
+BOT_USERNAME = "ChatBot"
+
 # ---------- Database helpers ----------
 def init_db():
     with sqlite3.connect(DB_FILE, check_same_thread=False) as conn:
@@ -33,7 +38,8 @@ def init_db():
         c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
-            password TEXT
+            password TEXT,
+            is_bot INTEGER DEFAULT 0
         )""")
         # friendships: user -> friend
         c.execute("""
@@ -70,16 +76,46 @@ def init_db():
             UNIQUE(group_id, username)
         )""")
         conn.commit()
+        
+        # Create bot user if it doesn't exist
+        create_bot_user()
 
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash password using bcrypt for better security"""
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
+def verify_password(password, hashed):
+    """Verify password against bcrypt hash"""
+    try:
+        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+    except:
+        # Fallback for old SHA256 hashes (backward compatibility)
+        return hashed == hashlib.sha256(password.encode()).hexdigest()
+
+def create_bot_user():
+    """Create the bot user in the database"""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=5.0) as conn:
+            c = conn.cursor()
+            # Check if bot already exists
+            c.execute("SELECT username FROM users WHERE username=?", (BOT_USERNAME,))
+            if not c.fetchone():
+                # Create bot user with a random password (won't be used for login)
+                bot_password = hash_password("bot_internal_password_" + str(time.time()))
+                c.execute("INSERT INTO users(username, password, is_bot) VALUES(?,?,1)", 
+                         (BOT_USERNAME, bot_password))
+                conn.commit()
+                print(f"Created bot user: {BOT_USERNAME}")
+    except Exception as e:
+        print(f"Error creating bot user: {e}")
 
 def db_register(username, password):
     try:
         with sqlite3.connect(DB_FILE, timeout=5.0) as conn:
             c = conn.cursor()
             hashed_pw = hash_password(password)
-            c.execute("INSERT INTO users(username,password) VALUES(?,?)", (username, hashed_pw))
+            c.execute("INSERT INTO users(username,password,is_bot) VALUES(?,?,0)", (username, hashed_pw))
             conn.commit()
             return True, "ok"
     except sqlite3.IntegrityError:
@@ -92,11 +128,16 @@ def db_check_login(username, password):
     try:
         with sqlite3.connect(DB_FILE, timeout=5.0) as conn:
             c = conn.cursor()
-            c.execute("SELECT password FROM users WHERE username=?", (username,))
+            c.execute("SELECT password, is_bot FROM users WHERE username=?", (username,))
             row = c.fetchone()
             if not row:
                 return False, "no_such_user"
-            if row[0] != hash_password(password):
+            
+            # Don't allow login as bot
+            if row[1] == 1:
+                return False, "bot_login_not_allowed"
+                
+            if not verify_password(password, row[0]):
                 return False, "bad_password"
             return True, "ok"
     except Exception as e:
@@ -141,6 +182,9 @@ def db_create_group(group_id, name, creator):
                      (group_id, name, creator, ts))
             c.execute("INSERT INTO group_members(group_id, username, joined_at) VALUES(?,?,?)",
                      (group_id, creator, ts))
+            # Add bot to the group
+            c.execute("INSERT INTO group_members(group_id, username, joined_at) VALUES(?,?,?)",
+                     (group_id, BOT_USERNAME, ts))
             conn.commit()
             return True, "ok"
     except sqlite3.IntegrityError:
@@ -159,6 +203,9 @@ def db_join_group(group_id, username):
                 return False, "no_such_group"
             c.execute("INSERT OR IGNORE INTO group_members(group_id, username, joined_at) VALUES(?,?,?)",
                      (group_id, username, time.time()))
+            # Make sure bot is also in the group
+            c.execute("INSERT OR IGNORE INTO group_members(group_id, username, joined_at) VALUES(?,?,?)",
+                     (group_id, BOT_USERNAME, time.time()))
             conn.commit()
             return True, "ok"
     except Exception as e:
@@ -169,6 +216,9 @@ def db_leave_group(group_id, username):
     try:
         with sqlite3.connect(DB_FILE, timeout=5.0) as conn:
             c = conn.cursor()
+            # Don't allow bot to leave groups
+            if username == BOT_USERNAME:
+                return False, "bot_cannot_leave"
             c.execute("DELETE FROM group_members WHERE group_id=? AND username=?", (group_id, username))
             conn.commit()
             return True, "ok"
@@ -247,6 +297,91 @@ def db_get_undelivered(username):
     except Exception as e:
         print(f"DB get undelivered error: {e}")
         return []
+
+# ---------- Bot functionality ----------
+def handle_bot_command(message_text, sender, group_id):
+    """Handle bot commands and return bot response if any"""
+    if not message_text.startswith('@'):
+        return None
+    
+    parts = message_text.split(' ', 1)
+    command = parts[0].lower()
+    
+    if command == '@echo':
+        if len(parts) > 1:
+            echo_text = parts[1]
+            return {
+                'type': 'group_echo',
+                'text': echo_text,
+                'group_id': group_id
+            }
+    
+    elif command == '@all':
+        if len(parts) > 1:
+            broadcast_text = parts[1]
+            return {
+                'type': 'private_broadcast',
+                'text': broadcast_text,
+                'group_id': group_id,
+                'original_sender': sender
+            }
+    
+    return None
+
+def execute_bot_action(action):
+    """Execute bot action"""
+    if action['type'] == 'group_echo':
+        # Send echo message to group
+        group_id = action['group_id']
+        text = action['text']
+        ts = time.time()
+        
+        members = db_get_group_members(group_id)
+        delivered_count = 0
+        
+        with lock:
+            for member in members:
+                if member != BOT_USERNAME:  # don't send to bot itself
+                    target_w = clients.get(member)
+                    if target_w and send_json_w(target_w, {
+                        "type": "group_msg",
+                        "from": BOT_USERNAME,
+                        "group_id": group_id,
+                        "text": text,
+                        "ts": ts
+                    }):
+                        delivered_count += 1
+        
+        # Store bot message
+        db_store_message(BOT_USERNAME, group_id=group_id, text=text, delivered=(delivered_count > 0))
+    
+    elif action['type'] == 'private_broadcast':
+        # Send private message to all group members
+        group_id = action['group_id']
+        text = action['text']
+        original_sender = action['original_sender']
+        ts = time.time()
+        
+        members = db_get_group_members(group_id)
+        broadcast_text = f"[Broadcast from {original_sender} in group {group_id}]: {text}"
+        
+        with lock:
+            for member in members:
+                if member not in [BOT_USERNAME, original_sender]:  # don't send to bot or original sender
+                    target_w = clients.get(member)
+                    if target_w:
+                        if send_json_w(target_w, {
+                            "type": "msg",
+                            "from": BOT_USERNAME,
+                            "to": member,
+                            "text": broadcast_text,
+                            "ts": ts
+                        }):
+                            db_store_message(BOT_USERNAME, receiver=member, text=broadcast_text, delivered=True)
+                        else:
+                            db_store_message(BOT_USERNAME, receiver=member, text=broadcast_text, delivered=False)
+                    else:
+                        db_store_message(BOT_USERNAME, receiver=member, text=broadcast_text, delivered=False)
 
 # ---------- Socket/Protocol helpers ----------
 def send_json_w(wfile, obj):
@@ -369,7 +504,7 @@ def handle_client(conn, addr):
                 if ok:
                     groups = db_get_user_groups(username)
                     send_json_w(wfile, {"type":"groups_list","groups":groups})
-                    send_json_w(wfile, {"type":"info","info":f"Created group {group_name}"})
+                    send_json_w(wfile, {"type":"info","info":f"Created group {group_name} (Bot automatically added)"})
                 else:
                     send_json_w(wfile, {"type":"error","error":reason})
             
@@ -442,6 +577,9 @@ def handle_client(conn, addr):
                     send_json_w(wfile, {"type":"error","error":"not_group_member"})
                     continue
                 
+                # Check for bot commands
+                bot_action = handle_bot_command(text, username, group_id)
+                
                 ts = time.time()
                 delivered_count = 0
                 with lock:
@@ -453,6 +591,10 @@ def handle_client(conn, addr):
                 
                 # store message (delivered if at least one member received it)
                 db_store_message(username, group_id=group_id, text=text, delivered=(delivered_count > 0))
+                
+                # Execute bot action if command was detected
+                if bot_action:
+                    execute_bot_action(bot_action)
                 
                 if delivered_count < len(members) - 1:
                     send_json_w(wfile, {"type":"info","info":"group_message_partially_queued"})
@@ -480,6 +622,7 @@ def main():
         s.bind((HOST, PORT))
         s.listen(128)
         print(f"Server listening on {HOST}:{PORT}")
+        print(f"Bot '{BOT_USERNAME}' is ready with commands: @echo <text>, @all <text>")
         
         while True:
             conn, addr = s.accept()

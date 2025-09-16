@@ -1,12 +1,13 @@
 # client.py
 """
-Terminal chat client with curses UI - Fixed Version
+Terminal chat client with curses UI - Enhanced Version with Bot Support
 - Connects to server (JSON-over-TCP)
 - Login/register with better validation
 - Shows sidebar of friends and groups, main window shows chat with selected friend/group
 - Local SQLite per-user caches messages, friends, and groups
 - Added group functionality and improved error handling
 - FIXED: Immediate message display and duplicate message issues
+- Added support for ChatBot with @echo and @all commands
 """
 
 import socket
@@ -21,6 +22,9 @@ from datetime import datetime
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 9999
+
+# Bot configuration
+BOT_USERNAME = "ChatBot"
 
 # ---------- DB (local cache) ----------
 def init_local_db(dbfile):
@@ -316,12 +320,20 @@ class ChatUI:
                 self.refresh_chat()
             else:
                 group_name = self._get_group_name(group_id)
-                self.log(f"New in {group_name}: {sender}: {text}")
+                # Special handling for bot messages
+                if sender == BOT_USERNAME:
+                    self.log(f"Bot in {group_name}: {text}")
+                else:
+                    self.log(f"New in {group_name}: {sender}: {text}")
         else:
             if sender == self.selected_friend and self.selected_type == "friend":
                 self.refresh_chat()
             else:
-                self.log(f"New from {sender}: {text}")
+                # Special handling for bot messages
+                if sender == BOT_USERNAME:
+                    self.log(f"Bot message: {text}")
+                else:
+                    self.log(f"New from {sender}: {text}")
 
     def _get_group_name(self, group_id):
         """Get group name by ID"""
@@ -344,9 +356,19 @@ class ChatUI:
             sender, receiver, group_id, text, ts = record
             timestamp = datetime.fromtimestamp(ts).strftime('%H:%M')
             if group_id:
-                prefix = f"{sender}: " if sender != self.username else "Me: "
+                if sender == BOT_USERNAME:
+                    prefix = "[Bot]: "
+                elif sender == self.username:
+                    prefix = "Me: "
+                else:
+                    prefix = f"{sender}: "
             else:
-                prefix = "Me: " if sender == self.username else f"{sender}: "
+                if sender == BOT_USERNAME:
+                    prefix = "[Bot]: "
+                elif sender == self.username:
+                    prefix = "Me: "
+                else:
+                    prefix = f"{sender}: "
             lines.append(f"[{timestamp}] {prefix}{text}")
         
         self.attach_chat_lines(lines)
@@ -355,9 +377,19 @@ class ChatUI:
         """Add a single message to current chat display"""
         timestamp = datetime.now().strftime('%H:%M')
         if is_group:
-            prefix = f"{sender}: " if sender != self.username else "Me: "
+            if sender == BOT_USERNAME:
+                prefix = "[Bot]: "
+            elif sender == self.username:
+                prefix = "Me: "
+            else:
+                prefix = f"{sender}: "
         else:
-            prefix = "Me: " if sender == self.username else f"{sender}: "
+            if sender == BOT_USERNAME:
+                prefix = "[Bot]: "
+            elif sender == self.username:
+                prefix = "Me: "
+            else:
+                prefix = f"{sender}: "
         
         new_line = f"[{timestamp}] {prefix}{text}"
         
@@ -435,9 +467,9 @@ class ChatUI:
                     if y >= self.height - 4:
                         break
 
-                # Input area
+                # Input area with bot command help
                 self.win_input.box()
-                help_text = " Commands: /add <user>, /create <group_id> <name>, /join <group_id>, /leave <group_id>, TAB=switch, /quit "
+                help_text = " Commands: /add <user>, /create <group> <name>, /join <group>, /leave <group>, @echo <text>, @all <text>, TAB=switch, /quit "
                 self.win_input.addstr(0, 2, help_text[:self.width-4])
                 try:
                     cursor_pos = min(len(self.input_buffer), self.width-3)
@@ -492,7 +524,7 @@ class ChatUI:
                 if line:
                     if line.startswith("/add "):
                         friend = line.split(" ", 1)[1].strip()
-                        if friend and re.match(r'^[a-zA-Z0-9_]+$', friend):
+                        if friend and re.match(r'^[a-zA-Z0-9_]+', friend):
                             self.send_cb({"type":"add_friend","friend":friend})
                             self.log(f"Adding friend {friend}...")
                         else:
@@ -503,7 +535,7 @@ class ChatUI:
                         if len(parts) >= 3:
                             group_id = parts[1].strip()
                             group_name = parts[2].strip()
-                            if group_id and group_name and re.match(r'^[a-zA-Z0-9_]+$', group_id):
+                            if group_id and group_name and re.match(r'^[a-zA-Z0-9_]+', group_id):
                                 self.send_cb({"type":"create_group","group_id":group_id,"name":group_name})
                                 self.log(f"Creating group {group_name}...")
                             else:
@@ -513,7 +545,7 @@ class ChatUI:
                     
                     elif line.startswith("/join "):
                         group_id = line.split(" ", 1)[1].strip()
-                        if group_id and re.match(r'^[a-zA-Z0-9_]+$', group_id):
+                        if group_id and re.match(r'^[a-zA-Z0-9_]+', group_id):
                             self.send_cb({"type":"join_group","group_id":group_id})
                             self.log(f"Joining group {group_id}...")
                         else:
@@ -531,6 +563,11 @@ class ChatUI:
                         return "quit"
                     
                     else:
+                        # Check for bot commands
+                        if line.startswith("@") and self.selected_type == "group" and self.selected_group:
+                            if line.startswith("@echo ") or line.startswith("@all "):
+                                self.log(f"Bot command sent: {line}")
+                        
                         # send message to selected friend or group
                         if self.selected_type == "friend" and self.selected_friend:
                             # Store message locally immediately for instant display
@@ -579,7 +616,8 @@ class ChatUI:
 # ---------- Main client logic ----------
 def run_client():
     print("=" * 50)
-    print("Welcome to StupidChat - Enhanced Version")
+    print("Welcome to StupidChat - Enhanced Version with Bot")
+    print("Bot Commands: @echo <text> (repeats in group), @all <text> (sends to all members)")
     print("=" * 50)
     
     while True:
@@ -590,7 +628,7 @@ def run_client():
     
     while True:
         username = input("Username (3+ chars, letters/numbers/underscore only): ").strip()
-        if len(username) >= 3 and re.match(r'^[a-zA-Z0-9_]+$', username):
+        if len(username) >= 3 and re.match(r'^[a-zA-Z0-9_]+', username):
             break
         print("Username must be at least 3 characters and contain only letters, numbers, and underscore.")
     
@@ -669,6 +707,7 @@ def run_client():
                 ui.refresh_chat()
 
                 ui.log("Connected! Use TAB to switch between friends/groups")
+                ui.log("Bot commands: @echo <text> (repeats), @all <text> (broadcast)")
                 ui.redraw()
 
                 # main input loop
