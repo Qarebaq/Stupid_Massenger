@@ -207,6 +207,8 @@ class NetworkThread(threading.Thread):
         except:
             pass
 
+
+
 # ---------- Enhanced curses UI ----------
 class ChatUI:
     def __init__(self, stdscr, send_cb, username, local_conn):
@@ -236,8 +238,11 @@ class ChatUI:
         self.logs = []
         self.input_buffer = ""
         self.chat_lines = []
+        self.current_chat_id = None  # Track current chat to prevent duplicate loading
+        self.scroll_position = 0  # For scrolling through chat history
         self.lock = threading.Lock()
         self.sidebar_items = []  # combined friends and groups for display
+        self.last_message_count = {}  # Track message count per chat to detect new messages
 
     def log(self, text):
         with self.lock:
@@ -313,43 +318,22 @@ class ChatUI:
                     return i
         return 0
 
-    def on_incoming(self, sender, text, is_group=False, group_id=None):
-        """Handle incoming message"""
-        if is_group:
-            if group_id == self.selected_group and self.selected_type == "group":
-                self.refresh_chat()
-            else:
-                group_name = self._get_group_name(group_id)
-                # Special handling for bot messages
-                if sender == BOT_USERNAME:
-                    self.log(f"Bot in {group_name}: {text}")
-                else:
-                    self.log(f"New in {group_name}: {sender}: {text}")
-        else:
-            if sender == self.selected_friend and self.selected_type == "friend":
-                self.refresh_chat()
-            else:
-                # Special handling for bot messages
-                if sender == BOT_USERNAME:
-                    self.log(f"Bot message: {text}")
-                else:
-                    self.log(f"New from {sender}: {text}")
+    def _get_current_chat_id(self):
+        """Get unique identifier for current chat"""
+        if self.selected_type == "friend" and self.selected_friend:
+            return f"friend:{self.selected_friend}"
+        elif self.selected_type == "group" and self.selected_group:
+            return f"group:{self.selected_group}"
+        return None
 
-    def _get_group_name(self, group_id):
-        """Get group name by ID"""
-        for g in self.groups:
-            if isinstance(g, dict) and g.get("id") == group_id:
-                return g.get("name", group_id)
-        return group_id
-
-    def refresh_chat(self):
-        """Refresh chat by reloading history from database"""
+    def _load_chat_history(self):
+        """Load chat history from database"""
         if self.selected_type == "friend" and self.selected_friend:
             hist = local_get_history(self.local_conn, self.username, other=self.selected_friend)
         elif self.selected_type == "group" and self.selected_group:
             hist = local_get_history(self.local_conn, self.username, group_id=self.selected_group)
         else:
-            hist = []
+            return []
 
         lines = []
         for record in hist:
@@ -371,35 +355,136 @@ class ChatUI:
                     prefix = f"{sender}: "
             lines.append(f"[{timestamp}] {prefix}{text}")
         
-        self.attach_chat_lines(lines)
+        return lines
 
-    def add_message_to_chat(self, sender, text, is_group=False, group_id=None):
-        """Add a single message to current chat display"""
-        timestamp = datetime.now().strftime('%H:%M')
-        if is_group:
-            if sender == BOT_USERNAME:
-                prefix = "[Bot]: "
-            elif sender == self.username:
-                prefix = "Me: "
-            else:
-                prefix = f"{sender}: "
-        else:
-            if sender == BOT_USERNAME:
-                prefix = "[Bot]: "
-            elif sender == self.username:
-                prefix = "Me: "
-            else:
-                prefix = f"{sender}: "
+    def on_incoming(self, sender, text, is_group=False, group_id=None):
+        """Handle incoming message - only add to current chat if it matches"""
+        current_chat_id = self._get_current_chat_id()
         
-        new_line = f"[{timestamp}] {prefix}{text}"
+        # Store in database first
+        if is_group:
+            local_store_message(self.local_conn, sender, None, group_id, text)
+            incoming_chat_id = f"group:{group_id}"
+            if incoming_chat_id == current_chat_id:
+                # Add to current display
+                timestamp = datetime.now().strftime('%H:%M')
+                if sender == BOT_USERNAME:
+                    prefix = "[Bot]: "
+                elif sender == self.username:
+                    prefix = "Me: "
+                else:
+                    prefix = f"{sender}: "
+                new_line = f"[{timestamp}] {prefix}{text}"
+                
+                with self.lock:
+                    self.chat_lines.append(new_line)
+                    # Keep only last 500 lines
+                    if len(self.chat_lines) > 500:
+                        self.chat_lines = self.chat_lines[-500:]
+                    # Auto-scroll to bottom for new messages
+                    self.scroll_position = 0
+                self.redraw()
+            else:
+                group_name = self._get_group_name(group_id)
+                if sender == BOT_USERNAME:
+                    self.log(f"Bot in {group_name}: {text}")
+                else:
+                    self.log(f"New in {group_name}: {sender}: {text}")
+        else:
+            local_store_message(self.local_conn, sender, self.username, None, text)
+            incoming_chat_id = f"friend:{sender}"
+            if incoming_chat_id == current_chat_id:
+                # Add to current display
+                timestamp = datetime.now().strftime('%H:%M')
+                if sender == BOT_USERNAME:
+                    prefix = "[Bot]: "
+                elif sender == self.username:
+                    prefix = "Me: "
+                else:
+                    prefix = f"{sender}: "
+                new_line = f"[{timestamp}] {prefix}{text}"
+                
+                with self.lock:
+                    self.chat_lines.append(new_line)
+                    if len(self.chat_lines) > 500:
+                        self.chat_lines = self.chat_lines[-500:]
+                    # Auto-scroll to bottom for new messages
+                    self.scroll_position = 0
+                self.redraw()
+            else:
+                if sender == BOT_USERNAME:
+                    self.log(f"Bot message: {text}")
+                else:
+                    self.log(f"New from {sender}: {text}")
+
+    def _get_group_name(self, group_id):
+        """Get group name by ID"""
+        for g in self.groups:
+            if isinstance(g, dict) and g.get("id") == group_id:
+                return g.get("name", group_id)
+        return group_id
+
+    def refresh_chat(self):
+        """Refresh chat by reloading history from database"""
+        current_chat_id = self._get_current_chat_id()
+        
+        # Always refresh when explicitly called
+        self.current_chat_id = current_chat_id
+        
+        lines = self._load_chat_history()
         
         with self.lock:
-            self.chat_lines.append(new_line)
-            # Keep only last 200 lines to prevent memory issues
-            if len(self.chat_lines) > 200:
-                self.chat_lines = self.chat_lines[-200:]
+            self.chat_lines = lines
+            self.scroll_position = 0  # Reset scroll to bottom
+        self.redraw()
+
+    def switch_to_chat(self, chat_type, chat_id):
+        """Switch to a specific chat and refresh its content"""
+        old_chat_id = self._get_current_chat_id()
+        
+        if chat_type == "friend":
+            self.selected_type = "friend"
+            self.selected_friend = chat_id
+            self.selected_group = None
+            self.selected_index = self._find_item_index("friend", chat_id)
+        elif chat_type == "group":
+            self.selected_type = "group"
+            self.selected_friend = None
+            self.selected_group = chat_id
+            self.selected_index = self._find_item_index("group", chat_id)
+        
+        new_chat_id = self._get_current_chat_id()
+        
+        # Always refresh when switching chats
+        if old_chat_id != new_chat_id:
+            self.refresh_chat()
         
         self.redraw()
+
+    def scroll_up(self):
+        """Scroll up in chat history"""
+        if self.chat_lines:
+            max_scroll = max(0, len(self.chat_lines) - (self.height - 6))
+            self.scroll_position = min(self.scroll_position + 5, max_scroll)
+            self.redraw()
+
+    def scroll_down(self):
+        """Scroll down in chat history"""
+        if self.scroll_position > 0:
+            self.scroll_position = max(0, self.scroll_position - 5)
+            self.redraw()
+
+    def scroll_to_bottom(self):
+        """Scroll to bottom of chat"""
+        self.scroll_position = 0
+        self.redraw()
+
+    def scroll_to_top(self):
+        """Scroll to top of chat"""
+        if self.chat_lines:
+            max_scroll = max(0, len(self.chat_lines) - (self.height - 6))
+            self.scroll_position = max_scroll
+            self.redraw()
 
     def redraw(self):
         try:
@@ -441,7 +526,7 @@ class ChatUI:
                             pass
                     y += 1
 
-                # Chat area title
+                # Chat area title with scroll indicator
                 self.win_chat.box()
                 if self.selected_type == "friend" and self.selected_friend:
                     title = f" Chat: {self.selected_friend} "
@@ -451,31 +536,68 @@ class ChatUI:
                 else:
                     title = " No chat selected "
                 
-                self.win_chat.addstr(0, 2, title)
-
-                # Chat lines
-                y = 1
-                available_height = self.height - 6
-                start_idx = max(0, len(self.chat_lines) - available_height)
+                # Add scroll indicator
+                if self.chat_lines and self.scroll_position > 0:
+                    scroll_indicator = f" ↑{self.scroll_position} "
+                    title = title[:-1] + scroll_indicator + title[-1:]
                 
-                for line in self.chat_lines[start_idx:]:
-                    try:
-                        self.win_chat.addstr(y, 1, line[:self.chat_w-2])
-                    except:
-                        pass
-                    y += 1
-                    if y >= self.height - 4:
-                        break
+                self.win_chat.addstr(0, 2, title[:self.chat_w-2])
 
-                # Input area with bot command help
+                # Chat lines with scrolling
+                available_height = self.height - 6
+                total_lines = len(self.chat_lines)
+                
+                if total_lines > 0:
+                    # Calculate which lines to show based on scroll position
+                    if self.scroll_position == 0:
+                        # Show last lines (normal chat view)
+                        start_idx = max(0, total_lines - available_height)
+                        end_idx = total_lines
+                    else:
+                        # Show lines from scroll position
+                        start_idx = max(0, total_lines - available_height - self.scroll_position)
+                        end_idx = total_lines - self.scroll_position
+                    
+                    y = 1
+                    for line in self.chat_lines[start_idx:end_idx]:
+                        if y >= self.height - 4:
+                            break
+                        try:
+                            # Handle long lines by wrapping them
+                            max_width = self.chat_w - 2
+                            if len(line) > max_width:
+                                # Split long lines
+                                wrapped_lines = [line[i:i+max_width] for i in range(0, len(line), max_width)]
+                                for wrapped_line in wrapped_lines:
+                                    if y >= self.height - 4:
+                                        break
+                                    self.win_chat.addstr(y, 1, wrapped_line)
+                                    y += 1
+                            else:
+                                self.win_chat.addstr(y, 1, line)
+                                y += 1
+                        except:
+                            y += 1  # Skip problematic lines but continue
+
+                # Input area with enhanced help
                 self.win_input.box()
-                help_text = " Commands: /add <user>, /create <group> <name>, /join <group>, /leave <group>, @echo <text>, @all <text>, TAB=switch, /quit "
-                self.win_input.addstr(0, 2, help_text[:self.width-4])
+                help_text = " PgUp/PgDn=scroll, Home/End=top/bottom, TAB=switch, /add /create /join /leave /quit "
                 try:
-                    cursor_pos = min(len(self.input_buffer), self.width-3)
-                    display_start = max(0, len(self.input_buffer) - self.width + 3)
-                    display_text = self.input_buffer[display_start:display_start + self.width - 3]
+                    self.win_input.addstr(0, 2, help_text[:self.width-4])
+                except:
+                    pass
+                
+                try:
+                    # Show input with cursor
+                    display_start = max(0, len(self.input_buffer) - self.width + 5)
+                    display_text = self.input_buffer[display_start:]
+                    if len(display_text) > self.width - 3:
+                        display_text = display_text[:self.width-3]
                     self.win_input.addstr(1, 1, display_text)
+                    # Show cursor position
+                    cursor_x = min(len(display_text), self.width - 3)
+                    if cursor_x < self.width - 3:
+                        self.win_input.addstr(1, 1 + cursor_x, "_", curses.A_BLINK)
                 except:
                     pass
 
@@ -491,6 +613,7 @@ class ChatUI:
     def attach_chat_lines(self, lines):
         with self.lock:
             self.chat_lines = lines
+            self.scroll_position = 0
         self.redraw()
 
     def input_loop(self):
@@ -517,6 +640,18 @@ class ChatUI:
                 if self.input_buffer:
                     self.input_buffer = self.input_buffer[:-1]
                     self.redraw()
+            
+            elif ch == curses.KEY_PPAGE:  # Page Up - scroll up
+                self.scroll_up()
+                
+            elif ch == curses.KEY_NPAGE:  # Page Down - scroll down
+                self.scroll_down()
+                
+            elif ch == curses.KEY_HOME:  # Home - scroll to top
+                self.scroll_to_top()
+                
+            elif ch == curses.KEY_END:  # End - scroll to bottom
+                self.scroll_to_bottom()
             
             elif ch == curses.KEY_ENTER or ch == 10 or ch == 13:
                 line = self.input_buffer.strip()
@@ -562,6 +697,11 @@ class ChatUI:
                     elif line == "/quit":
                         return "quit"
                     
+                    elif line == "/refresh":
+                        # Manual refresh command
+                        self.refresh_chat()
+                        self.log("Chat refreshed.")
+                    
                     else:
                         # Check for bot commands
                         if line.startswith("@") and self.selected_type == "group" and self.selected_group:
@@ -570,14 +710,37 @@ class ChatUI:
                         
                         # send message to selected friend or group
                         if self.selected_type == "friend" and self.selected_friend:
-                            # Store message locally immediately for instant display
+                            # Store in database first
                             local_store_message(self.local_conn, self.username, self.selected_friend, None, line)
-                            self.add_message_to_chat(self.username, line, is_group=False)
+                            
+                            # Add to display
+                            timestamp = datetime.now().strftime('%H:%M')
+                            new_line = f"[{timestamp}] Me: {line}"
+                            with self.lock:
+                                self.chat_lines.append(new_line)
+                                if len(self.chat_lines) > 500:
+                                    self.chat_lines = self.chat_lines[-500:]
+                                # Auto-scroll to bottom for sent messages
+                                self.scroll_position = 0
+                            
+                            # Send to server
                             self.send_cb({"type":"msg","to":self.selected_friend,"text":line})
+                            
                         elif self.selected_type == "group" and self.selected_group:
-                            # Store message locally immediately for instant display
+                            # Store in database first
                             local_store_message(self.local_conn, self.username, None, self.selected_group, line)
-                            self.add_message_to_chat(self.username, line, is_group=True, group_id=self.selected_group)
+                            
+                            # Add to display
+                            timestamp = datetime.now().strftime('%H:%M')
+                            new_line = f"[{timestamp}] Me: {line}"
+                            with self.lock:
+                                self.chat_lines.append(new_line)
+                                if len(self.chat_lines) > 500:
+                                    self.chat_lines = self.chat_lines[-500:]
+                                # Auto-scroll to bottom for sent messages
+                                self.scroll_position = 0
+                            
+                            # Send to server
                             self.send_cb({"type":"group_msg","group_id":self.selected_group,"text":line})
                         else:
                             self.log("No friend or group selected")
@@ -593,17 +756,39 @@ class ChatUI:
                         if item_type != "header":
                             self.selected_index = current
                             if item_type == "friend":
-                                self.selected_type = "friend"
-                                self.selected_friend = item_value
-                                self.selected_group = None
+                                self.switch_to_chat("friend", item_value)
                             else:  # group
-                                self.selected_type = "group"
-                                self.selected_friend = None
-                                if isinstance(item_value, dict):
-                                    self.selected_group = item_value["id"]
-                                else:
-                                    self.selected_group = item_value
+                                group_id = item_value["id"] if isinstance(item_value, dict) else item_value
+                                self.switch_to_chat("group", group_id)
                             return "switch"
+            
+            elif ch == curses.KEY_UP:
+                # Navigate up in sidebar
+                if self.sidebar_items and self.selected_index > 0:
+                    for i in range(self.selected_index - 1, -1, -1):
+                        item_type, item_value = self.sidebar_items[i]
+                        if item_type != "header":
+                            self.selected_index = i
+                            if item_type == "friend":
+                                self.switch_to_chat("friend", item_value)
+                            else:  # group
+                                group_id = item_value["id"] if isinstance(item_value, dict) else item_value
+                                self.switch_to_chat("group", group_id)
+                            break
+            
+            elif ch == curses.KEY_DOWN:
+                # Navigate down in sidebar
+                if self.sidebar_items and self.selected_index < len(self.sidebar_items) - 1:
+                    for i in range(self.selected_index + 1, len(self.sidebar_items)):
+                        item_type, item_value = self.sidebar_items[i]
+                        if item_type != "header":
+                            self.selected_index = i
+                            if item_type == "friend":
+                                self.switch_to_chat("friend", item_value)
+                            else:  # group
+                                group_id = item_value["id"] if isinstance(item_value, dict) else item_value
+                                self.switch_to_chat("group", group_id)
+                            break
             
             elif 32 <= ch <= 126 or ch >= 128:
                 # regular character input
@@ -612,6 +797,11 @@ class ChatUI:
                     self.redraw()
                 except:
                     pass
+
+
+
+
+
 
 # ---------- Main client logic ----------
 def run_client():
