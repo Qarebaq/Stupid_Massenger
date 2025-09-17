@@ -208,7 +208,6 @@ class NetworkThread(threading.Thread):
             pass
 
 
-
 # ---------- Enhanced curses UI ----------
 class ChatUI:
     def __init__(self, stdscr, send_cb, username, local_conn):
@@ -581,7 +580,7 @@ class ChatUI:
 
                 # Input area with enhanced help
                 self.win_input.box()
-                help_text = " PgUp/PgDn=scroll, Home/End=top/bottom, TAB=switch, /add /create /join /leave /quit "
+                help_text = " ↑↓=scroll chat, PgUp/PgDn=fast scroll, Home/End=top/bottom, TAB=switch chat, Ctrl+↑↓=switch contact "
                 try:
                     self.win_input.addstr(0, 2, help_text[:self.width-4])
                 except:
@@ -652,6 +651,75 @@ class ChatUI:
                 
             elif ch == curses.KEY_END:  # End - scroll to bottom
                 self.scroll_to_bottom()
+            
+            elif ch == curses.KEY_UP:
+                # UP arrow: scroll up in chat (or navigate sidebar if at input)
+                if len(self.input_buffer) == 0:  # Only scroll chat if input is empty
+                    self.scroll_up()
+                else:
+                    # If typing, navigate sidebar
+                    if self.sidebar_items and self.selected_index > 0:
+                        for i in range(self.selected_index - 1, -1, -1):
+                            item_type, item_value = self.sidebar_items[i]
+                            if item_type != "header":
+                                self.selected_index = i
+                                if item_type == "friend":
+                                    self.switch_to_chat("friend", item_value)
+                                else:  # group
+                                    group_id = item_value["id"] if isinstance(item_value, dict) else item_value
+                                    self.switch_to_chat("group", group_id)
+                                break
+            
+            elif ch == curses.KEY_DOWN:
+                # DOWN arrow: scroll down in chat (or navigate sidebar if at input)
+                if len(self.input_buffer) == 0:  # Only scroll chat if input is empty
+                    self.scroll_down()
+                else:
+                    # If typing, navigate sidebar
+                    if self.sidebar_items and self.selected_index < len(self.sidebar_items) - 1:
+                        for i in range(self.selected_index + 1, len(self.sidebar_items)):
+                            item_type, item_value = self.sidebar_items[i]
+                            if item_type != "header":
+                                self.selected_index = i
+                                if item_type == "friend":
+                                    self.switch_to_chat("friend", item_value)
+                                else:  # group
+                                    group_id = item_value["id"] if isinstance(item_value, dict) else item_value
+                                    self.switch_to_chat("group", group_id)
+                                break
+            
+            elif ch == 27:  # ESC sequence (Ctrl combinations)
+                # Get next character to check for Ctrl+Arrow
+                try:
+                    next_ch = self.stdscr.getch()
+                    if next_ch == 91:  # '[' - ANSI escape sequence
+                        arrow_ch = self.stdscr.getch()
+                        if arrow_ch == 65:  # Ctrl+Up - navigate contacts up
+                            if self.sidebar_items and self.selected_index > 0:
+                                for i in range(self.selected_index - 1, -1, -1):
+                                    item_type, item_value = self.sidebar_items[i]
+                                    if item_type != "header":
+                                        self.selected_index = i
+                                        if item_type == "friend":
+                                            self.switch_to_chat("friend", item_value)
+                                        else:  # group
+                                            group_id = item_value["id"] if isinstance(item_value, dict) else item_value
+                                            self.switch_to_chat("group", group_id)
+                                        break
+                        elif arrow_ch == 66:  # Ctrl+Down - navigate contacts down
+                            if self.sidebar_items and self.selected_index < len(self.sidebar_items) - 1:
+                                for i in range(self.selected_index + 1, len(self.sidebar_items)):
+                                    item_type, item_value = self.sidebar_items[i]
+                                    if item_type != "header":
+                                        self.selected_index = i
+                                        if item_type == "friend":
+                                            self.switch_to_chat("friend", item_value)
+                                        else:  # group
+                                            group_id = item_value["id"] if isinstance(item_value, dict) else item_value
+                                            self.switch_to_chat("group", group_id)
+                                        break
+                except:
+                    pass
             
             elif ch == curses.KEY_ENTER or ch == 10 or ch == 13:
                 line = self.input_buffer.strip()
@@ -762,34 +830,6 @@ class ChatUI:
                                 self.switch_to_chat("group", group_id)
                             return "switch"
             
-            elif ch == curses.KEY_UP:
-                # Navigate up in sidebar
-                if self.sidebar_items and self.selected_index > 0:
-                    for i in range(self.selected_index - 1, -1, -1):
-                        item_type, item_value = self.sidebar_items[i]
-                        if item_type != "header":
-                            self.selected_index = i
-                            if item_type == "friend":
-                                self.switch_to_chat("friend", item_value)
-                            else:  # group
-                                group_id = item_value["id"] if isinstance(item_value, dict) else item_value
-                                self.switch_to_chat("group", group_id)
-                            break
-            
-            elif ch == curses.KEY_DOWN:
-                # Navigate down in sidebar
-                if self.sidebar_items and self.selected_index < len(self.sidebar_items) - 1:
-                    for i in range(self.selected_index + 1, len(self.sidebar_items)):
-                        item_type, item_value = self.sidebar_items[i]
-                        if item_type != "header":
-                            self.selected_index = i
-                            if item_type == "friend":
-                                self.switch_to_chat("friend", item_value)
-                            else:  # group
-                                group_id = item_value["id"] if isinstance(item_value, dict) else item_value
-                                self.switch_to_chat("group", group_id)
-                            break
-            
             elif 32 <= ch <= 126 or ch >= 128:
                 # regular character input
                 try:
@@ -797,9 +837,6 @@ class ChatUI:
                     self.redraw()
                 except:
                     pass
-
-
-
 
 
 
