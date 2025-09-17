@@ -208,6 +208,10 @@ class NetworkThread(threading.Thread):
             pass
 
 
+
+
+
+
 # ---------- Enhanced curses UI ----------
 class ChatUI:
     def __init__(self, stdscr, send_cb, username, local_conn):
@@ -578,9 +582,14 @@ class ChatUI:
                         except:
                             y += 1  # Skip problematic lines but continue
 
-                # Input area with enhanced help
+                # Input area with enhanced help - show different help based on terminal width
                 self.win_input.box()
-                help_text = " ↑↓=scroll chat, PgUp/PgDn=fast scroll, Home/End=top/bottom, TAB=switch chat, Ctrl+↑↓=switch contact "
+                if self.width > 120:
+                    help_text = " Commands: /add <user>, /create <group> <name>, /join <group>, /leave <group>, /quit, /refresh | ↑↓=scroll, PgUp/PgDn=fast, TAB=switch "
+                elif self.width > 80:
+                    help_text = " /add /create /join /leave /quit /refresh | ↑↓=scroll, PgUp/PgDn=fast scroll, TAB=switch chat "
+                else:
+                    help_text = " /add /join /quit | ↑↓=scroll, TAB=switch "
                 try:
                     self.win_input.addstr(0, 2, help_text[:self.width-4])
                 except:
@@ -837,6 +846,10 @@ class ChatUI:
                     self.redraw()
                 except:
                     pass
+
+
+
+
 
 
 
