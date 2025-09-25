@@ -679,7 +679,7 @@ class ChatUI:
                                     self.switch_to_chat("group", group_id)
                                 break
             
-            elif ch == curses.KEY_DOWN:
+            elif ch == curses.KEY_DOWN or ch== ord('\t'):
                 # DOWN arrow: scroll down in chat (or navigate sidebar if at input)
                 if len(self.input_buffer) == 0:  # Only scroll chat if input is empty
                     self.scroll_down()
@@ -823,21 +823,21 @@ class ChatUI:
                             self.log("No friend or group selected")
                 self.redraw()
             
-            elif ch == 9:  # TAB: switch selection
-                if self.sidebar_items:
-                    # find next selectable item (skip headers)
-                    current = self.selected_index
-                    for _ in range(len(self.sidebar_items)):
-                        current = (current + 1) % len(self.sidebar_items)
-                        item_type, item_value = self.sidebar_items[current]
-                        if item_type != "header":
-                            self.selected_index = current
-                            if item_type == "friend":
-                                self.switch_to_chat("friend", item_value)
-                            else:  # group
-                                group_id = item_value["id"] if isinstance(item_value, dict) else item_value
-                                self.switch_to_chat("group", group_id)
-                            return "switch"
+            # elif ch == 9:  # TAB: switch selection
+            #     if self.sidebar_items:
+            #         # find next selectable item (skip headers)
+            #         current = self.selected_index
+            #         for _ in range(len(self.sidebar_items)):
+            #             current = (current + 1) % len(self.sidebar_items)
+            #             item_type, item_value = self.sidebar_items[current]
+            #             if item_type != "header":
+            #                 self.selected_index = current
+            #                 if item_type == "friend":
+            #                     self.switch_to_chat("friend", item_value)
+            #                 else:  # group
+            #                     group_id = item_value["id"] if isinstance(item_value, dict) else item_value
+            #                     self.switch_to_chat("group", group_id)
+            #                 return "switch"
             
             elif 32 <= ch <= 126 or ch >= 128:
                 # regular character input
